@@ -1,76 +1,94 @@
-# app.py
-import streamlit as st
-from scraper import scrape_website
-from report_generator import save_as_pdf, save_as_txt
-
-st.title("Universal Web Scraper")
-url = st.text_input("Enter a website URL:", "https://example.com")
-depth = st.slider("Crawl Depth", 1, 3, 2)
-
-if st.button("Start Scraping"):
-    with st.spinner("Scraping in progress..."):
-        scraped_data = scrape_website(url, depth)
-        save_as_txt(scraped_data)
-        save_as_pdf(scraped_data)
-    st.success("Scraping Complete!")
-    st.download_button("Download Report (TXT)", data=open("report.txt", "rb"), file_name="report.txt")
-    st.download_button("Download Report (PDF)", data=open("report.pdf", "rb"), file_name="report.pdf")
-
-
-# scraper.py
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+import pandas as pd
+import streamlit as st
+import time
 
-visited_links = set()
+# ---------- SCRAPER FUNCTION ----------
+def get_all_links(base_url, max_pages=50):
+    visited = set()
+    to_visit = [base_url]
+    product_links = []
 
-def scrape_website(base_url, depth=2):
-    content = []
-
-    def crawl(url, current_depth):
-        if current_depth > depth or url in visited_links:
-            return
+    while to_visit and len(visited) < max_pages:
+        url = to_visit.pop(0)
+        if url in visited:
+            continue
         try:
             response = requests.get(url, timeout=5)
-            if response.status_code != 200:
-                return
-            visited_links.add(url)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            text = soup.get_text(separator=' ', strip=True)
-            content.append(f"\nURL: {url}\n{text}\n")
+            visited.add(url)
+            soup = BeautifulSoup(response.text, "lxml")
 
-            for link in soup.find_all('a', href=True):
-                absolute_link = urljoin(url, link['href'])
-                if urlparse(absolute_link).netloc == urlparse(base_url).netloc:
-                    crawl(absolute_link, current_depth + 1)
+            # Extract product info
+            if "product" in url:
+                product_links.append(url)
 
+            # Find all internal links
+            for link in soup.find_all("a", href=True):
+                href = urljoin(base_url, link['href'])
+                if urlparse(href).netloc == urlparse(base_url).netloc and href not in visited:
+                    to_visit.append(href)
         except Exception as e:
-            print(f"Failed to crawl {url}: {e}")
+            print("Error accessing:", url)
+            continue
 
-    crawl(base_url, 0)
-    return content
-
-
-# report_generator.py
-from fpdf import FPDF
-
-def save_as_pdf(data, filename='report.pdf'):
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    for line in data:
-        pdf.multi_cell(0, 10, line)
-    pdf.output(filename)
-
-def save_as_txt(data, filename='report.txt'):
-    with open(filename, 'w', encoding='utf-8') as f:
-        for line in data:
-            f.write(line + '\n')
+    return list(set(product_links))
 
 
-# requirements.txt
-streamlit
-beautifulsoup4
-requests
-fpdf
+def scrape_product_info(product_url):
+    try:
+        response = requests.get(product_url)
+        soup = BeautifulSoup(response.text, "lxml")
+
+        title = soup.find("h4", class_="title").text.strip() if soup.find("h4", class_="title") else ""
+        price = soup.find("h4", class_="price").text.strip() if soup.find("h4", class_="price") else ""
+        description = soup.find("p", class_="description").text.strip() if soup.find("p", class_="description") else ""
+        reviews = soup.find("p", class_="pull-right").text.strip() if soup.find("p", class_="pull-right") else ""
+
+        return {
+            "URL": product_url,
+            "Title": title,
+            "Price": price,
+            "Description": description,
+            "Reviews": reviews
+        }
+    except Exception as e:
+        return {
+            "URL": product_url,
+            "Title": "Error",
+            "Price": "",
+            "Description": "",
+            "Reviews": ""
+        }
+
+# ---------- STREAMLIT UI ----------
+st.set_page_config(page_title="E-commerce Web Scraper", layout="wide")
+st.title("🛍️ E-commerce Web Scraper")
+st.write("Scrapes products from a demo e-commerce site and exports to CSV")
+
+base_url = "https://webscraper.io/test-sites/e-commerce/static"
+if st.button("Start Scraping"):
+    with st.spinner("Scraping subpages..."):
+        links = get_all_links(base_url)
+        st.success(f"Found {len(links)} product pages")
+
+        results = []
+        progress = st.progress(0)
+        for i, link in enumerate(links):
+            info = scrape_product_info(link)
+            results.append(info)
+            progress.progress((i + 1) / len(links))
+
+        df = pd.DataFrame(results)
+        st.dataframe(df)
+
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Download Report as CSV",
+            csv,
+            "ecommerce_report.csv",
+            "text/csv"
+        )
+
+        st.success("✅ Done!")
